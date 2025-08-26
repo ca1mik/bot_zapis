@@ -17,8 +17,19 @@ SCOPES = [
 
 class Sheets:
     def __init__(self):
-        info = json.loads(cfg.google_creds_json)
+        raw_json = cfg.google_creds_json
+        try:
+            info = json.loads(raw_json)
+        except Exception as e:
+            raise RuntimeError(f"GOOGLE_CREDS_JSON невалиден: {e}")
+
+        pk = info.get("private_key", "")
+        # если в значении встречается литеральная последовательность \n — заменим на реальный перевод строки
+        if isinstance(pk, str) and "\\n" in pk:
+            info["private_key"] = pk.replace("\\n", "\n").replace("\r\n", "\n")
+
         creds = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
+
         self.gc = gspread.authorize(creds)
         self.sh = self.gc.open_by_key(cfg.spreadsheet_id)
         self.ws_book = self._get_or_create_ws(cfg.sheet_bookings, cols=len(HEADERS_BOOK))
