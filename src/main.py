@@ -139,9 +139,22 @@ def admin_kb(row: dict) -> InlineKeyboardMarkup:
 
 # ---------- Команды ----------
 
-@router.message(F.text.in_({"/start", "🆕 Новая заявка"}))
+# /start — показать меню (и удалить команду из чата)
+@router.message(F.text == "/start")
 async def cmd_start(message: Message, state: FSMContext):
+    try: await message.delete()
+    except: pass
     await goto_menu(message.bot, message.chat.id, state, "Привет! Это запись на активности @qwesade.")
+
+# кнопка реплай "🆕 Новая заявка" — сразу в поток (и удалить сообщение пользователя)
+@router.message(F.text == "🆕 Новая заявка")
+async def msg_new(message: Message, state: FSMContext):
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    await goto_flow(message.bot, message.chat.id, state)
+
 
 
 @router.message(F.text == "/new")
@@ -154,8 +167,15 @@ async def cmd_new(evt, state: FSMContext):
 
 @router.message(F.text == "/help")
 async def cmd_help(message: Message):
+    try: await message.delete()
+    except: pass
     await message.answer("/start — меню\n/new — новая запись\n/avail — доступность\n/mine — мои заявки\n/agenda — ближайшие подтверждённые")
 
+@router.message(F.text == "/new")
+async def cmd_new_msg(message: Message, state: FSMContext):
+    try: await message.delete()
+    except: pass
+    await goto_flow(message.bot, message.chat.id, state)
 
 # ---------- Инфо-разделы ----------
 
@@ -483,19 +503,32 @@ async def on_confirm(cb: CallbackQuery, state: FSMContext, bot: Bot):
 async def on_cancel(message: Message, state: FSMContext):
     bot, chat_id = message.bot, message.chat.id
 
-    # 1) удалить прошлые сообщения бота (шаг и якорь)
+    # удалить сообщение пользователя ("Отмена")
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    # удалить прошлые сообщения бота (шаг и якорь)
     data = await state.get_data()
     await _delete_msg_by_id(bot, chat_id, data.get("step_msg_id"))
     await _delete_msg_by_id(bot, chat_id, data.get("reply_msg_id"))
 
-    # 2) очистить стейт
+    # очистить стейт
     await state.clear()
 
-    # 3) показать меню (send_step сам создаст новый якорь и шаг)
+    # показать меню (если не нужен текст — поставь title=None)
     await send_step(bot, chat_id, state, "Отменено.", kb.kb_main_menu().as_markup(), reply_mode="menu")
+
 
 @router.message(F.text == "⬅ Назад")
 async def on_back(message: Message, state: FSMContext):
+    # удалить сообщение пользователя ("Назад")
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
     st = await state.get_state()
     bot, chat_id = message.bot, message.chat.id
 
