@@ -1,11 +1,11 @@
 # src/main.py
 import os
-from aiohttp import web
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-
 import asyncio
 import logging
 from datetime import datetime, date, timedelta
+
+from aiohttp import web
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
@@ -13,11 +13,9 @@ from aiogram.enums import ParseMode
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
     Message, CallbackQuery,
-    ReplyKeyboardMarkup, KeyboardButton
+    ReplyKeyboardMarkup, KeyboardButton,
+    InlineKeyboardMarkup, InlineKeyboardButton,
 )
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram import BaseMiddleware
-from contextlib import suppress
 
 from src.config import cfg
 from src.states import BookingFSM
@@ -25,27 +23,6 @@ from src.parsing import parse_date_human, normalize_range, parse_hhmm
 from src.sheets import sheets
 from src import keyboards as kb
 from src.calendar_kb import build_month_kb
-
-# Функция для безопасного удаления сообщений
-async def _delete_silent(msg):
-    try:
-        await msg.delete()
-    except Exception:
-        pass
-
-class AutoDeleteUserTextMiddleware(BaseMiddleware):
-    async def __call__(self, handler, event, data):
-        # Проверяем, что это личный чат и сообщение пользователя
-        if isinstance(event, Message) and event.chat.type == "private" and (event.text or "").strip():
-            # Сначала даём хендлерам отработать
-            result = await handler(event, data)
-            # Потом удаляем сообщение пользователя
-            with suppress(Exception):
-                await event.delete()
-            return result
-
-        # Если не текст или не личка — пропускаем дальше
-        return await handler(event, data)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 log = logging.getLogger("qwesade.bot")
@@ -58,13 +35,11 @@ ANCHOR_TEXT = "\u2063"
 # --- Webhook config (для Render) ---
 WEBHOOK_PATH = "/webhook"
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "change_me")  # поставь случайную строку в ENV
-# Render сам даёт внешний URL в переменной RENDER_EXTERNAL_URL — используем как базу
 WEBHOOK_BASE = os.getenv("WEBHOOK_BASE") or os.getenv("RENDER_EXTERNAL_URL", "")
 WEBHOOK_URL = f"{WEBHOOK_BASE}{WEBHOOK_PATH}" if WEBHOOK_BASE else ""
 
 
 # ---------- Reply-клава снизу ----------
-
 def _reply_markup(mode: str) -> ReplyKeyboardMarkup:
     if mode == "menu":
         return ReplyKeyboardMarkup(
@@ -77,6 +52,7 @@ def _reply_markup(mode: str) -> ReplyKeyboardMarkup:
         resize_keyboard=True
     )
 
+
 async def _delete_msg_by_id(bot, chat_id: int, msg_id: int | None):
     if not msg_id:
         return
@@ -84,6 +60,7 @@ async def _delete_msg_by_id(bot, chat_id: int, msg_id: int | None):
         await bot.delete_message(chat_id, msg_id)
     except Exception:
         pass
+
 
 async def _set_reply_mode(bot: Bot, chat_id: int, state: FSMContext, mode: str):
     data = await state.get_data()
@@ -106,24 +83,37 @@ async def send_step(bot: Bot, chat_id: int, state: FSMContext, text: str, inline
 
     data = await state.get_data()
     old_id = data.get("step_msg_id")
+
+    # быстрее: пытаемся редактировать старое сообщение
     if old_id:
         try:
-            await bot.delete_message(chat_id, old_id)
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=old_id,
+                text=text,
+                reply_markup=inline_markup,
+            )
+            return  # id шага не меняется
         except Exception:
-            pass
+            # если редактирование не удалось — удаляем и шлём новое
+            try:
+                await bot.delete_message(chat_id, old_id)
+            except Exception:
+                pass
 
     m = await bot.send_message(chat_id, text, reply_markup=inline_markup)
     await state.update_data(step_msg_id=m.message_id)
 
 
 async def goto_menu(bot: Bot, chat_id: int, state: FSMContext, title: str | None = None):
-    await state.set_state()
+    await state.set_state()  # сброс на None
     await send_step(bot, chat_id, state, title or "Выбери действие:", kb.kb_main_menu().as_markup(), reply_mode="menu")
 
 
 async def goto_flow(bot: Bot, chat_id: int, state: FSMContext):
     await state.set_state(BookingFSM.choosing_service)
     await send_step(bot, chat_id, state, "Что хочется?", kb.kb_services().as_markup(), reply_mode="flow")
+
 
 def admin_kb(row: dict) -> InlineKeyboardMarkup:
     req_id = row["RequestID"]
@@ -137,17 +127,19 @@ def admin_kb(row: dict) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="👤 Связаться", url=contact_url)],
     ])
 
-# ---------- Команды ----------
 
-# /start — показать меню (и удалить команду из чата)
-# /start — показать меню (и удалить команду из чата)
+# ---------- Команды ----------
 @router.message(F.text.regexp(r"^/start(\s|$)"))
 async def cmd_start(message: Message, state: FSMContext):
-    try: await message.delete()
-    except: pass
+    # удаляем команду пользователя, чтобы не засорять чат
+    try:
+        await message.delete()
+    except Exception:
+        pass
     await goto_menu(message.bot, message.chat.id, state, "Привет! Это запись на активности @qwesade.")
 
-# кнопка реплай "🆕 Новая заявка" — сразу в поток (и удалить сообщение пользователя)
+
+# кнопка реплай "🆕 Новая заявка"
 @router.message(F.text == "🆕 Новая заявка")
 async def msg_new(message: Message, state: FSMContext):
     try:
@@ -157,29 +149,31 @@ async def msg_new(message: Message, state: FSMContext):
     await goto_flow(message.bot, message.chat.id, state)
 
 
-
+# /new и инлайн-кнопка "new"
 @router.message(F.text == "/new")
 @router.callback_query(F.data == "new")
 async def cmd_new(evt, state: FSMContext):
     bot = evt.bot
     chat_id = evt.message.chat.id if isinstance(evt, CallbackQuery) else evt.chat.id
+    # если это текстовое сообщение пользователя — удалим его
+    if isinstance(evt, Message):
+        try:
+            await evt.delete()
+        except Exception:
+            pass
     await goto_flow(bot, chat_id, state)
 
 
 @router.message(F.text == "/help")
 async def cmd_help(message: Message):
-    try: await message.delete()
-    except: pass
+    try:
+        await message.delete()
+    except Exception:
+        pass
     await message.answer("/start — меню\n/new — новая запись\n/avail — доступность\n/mine — мои заявки\n/agenda — ближайшие подтверждённые")
 
-@router.message(F.text == "/new")
-async def cmd_new_msg(message: Message, state: FSMContext):
-    try: await message.delete()
-    except: pass
-    await goto_flow(message.bot, message.chat.id, state)
 
 # ---------- Инфо-разделы ----------
-
 @router.callback_query(F.data == "mine")
 async def cb_mine(cb: CallbackQuery, state: FSMContext):
     rows = sheets.user_recent(cb.from_user.id, limit=5)
@@ -234,7 +228,6 @@ async def cmd_agenda(message: Message):
 
 
 # ---------- Сценарий записи ----------
-
 @router.callback_query(BookingFSM.choosing_service, F.data.startswith("svc:"))
 async def on_service(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
@@ -297,7 +290,10 @@ async def on_time_text_one(message: Message, state: FSMContext):
             return await on_back(message, state)
         else:
             return await on_cancel(message, state)
-    await message.delete()
+    try:
+        await message.delete()
+    except Exception:
+        pass
 
     low = txt.lower().replace("ё", "е")
     if low in {"весь день", "весьдень"}:
@@ -316,7 +312,7 @@ async def on_time_text_one(message: Message, state: FSMContext):
         return await send_step(message.bot, message.chat.id, state, "Какой район/локация? (можно 'без разницы')")
 
     if parse_hhmm(txt):
-        # ввели только начало — попросим конец (но в рамках нашего состояния getting_time_start)
+        # ввели только начало — попросим конец
         await state.update_data(_t_start=txt)
         await state.set_state(BookingFSM.getting_time_end)
         return await send_step(message.bot, message.chat.id, state, "Конец: <b>HH:MM</b>")
@@ -334,7 +330,10 @@ async def on_time_start(message: Message, state: FSMContext):
             return await on_back(message, state)
         else:
             return await on_cancel(message, state)
-    await message.delete()
+    try:
+        await message.delete()
+    except Exception:
+        pass
 
     # сразу интервал — принимаем
     import re
@@ -362,7 +361,11 @@ async def on_time_end(message: Message, state: FSMContext):
             return await on_back(message, state)
         else:
             return await on_cancel(message, state)
-    await message.delete()
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
     data = await state.get_data()
     slot = normalize_range(data.get("_t_start", ""), txt)
     if not slot:
@@ -381,7 +384,11 @@ async def on_district(message: Message, state: FSMContext):
             return await on_back(message, state)
         else:
             return await on_cancel(message, state)
-    await message.delete()
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
     await state.update_data(district=txt)
     await state.set_state(BookingFSM.getting_wishes)
     await send_step(message.bot, message.chat.id, state, "Пожелания/детали? (можно написать 'нет')")
@@ -391,7 +398,11 @@ async def on_district(message: Message, state: FSMContext):
 @router.message(BookingFSM.getting_wishes)
 async def on_wishes(message: Message, state: FSMContext):
     wishes_text = (message.text or "").strip()
-    await message.delete()
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
     if wishes_text.lower() in {"нет", "-", "—"}:
         wishes_text = ""
     await state.update_data(wishes=wishes_text)
@@ -443,7 +454,7 @@ async def on_confirm(cb: CallbackQuery, state: FSMContext, bot: Bot):
         if free_list:
             text += "\nСвободно:\n" + "\n".join(f"• {s}" for s in free_list)
 
-        # Удаляем старое сообщение бота перед очисткой
+        # удалить старые сервисные сообщения бота
         data = await state.get_data()
         await _delete_msg_by_id(cb.bot, cb.message.chat.id, data.get("step_msg_id"))
         await _delete_msg_by_id(cb.bot, cb.message.chat.id, data.get("reply_msg_id"))
@@ -476,7 +487,7 @@ async def on_confirm(cb: CallbackQuery, state: FSMContext, bot: Bot):
             await state.clear()
             return await goto_menu(bot, cb.message.chat.id, state, "Ой, слот только что заняли. Попробуй другой.")
     except Exception as e:
-        # Удаляем старое сообщение бота перед очисткой
+        # удалить старые сервисные сообщения бота
         data = await state.get_data()
         await _delete_msg_by_id(cb.bot, cb.message.chat.id, data.get("step_msg_id"))
         await _delete_msg_by_id(cb.bot, cb.message.chat.id, data.get("reply_msg_id"))
@@ -499,7 +510,6 @@ async def on_confirm(cb: CallbackQuery, state: FSMContext, bot: Bot):
 
 
 # ---------- Reply-кнопки Назад/Отмена ----------
-
 @router.message(F.text == "❌ Отмена")
 async def on_cancel(message: Message, state: FSMContext):
     bot, chat_id = message.bot, message.chat.id
@@ -518,7 +528,7 @@ async def on_cancel(message: Message, state: FSMContext):
     # очистить стейт
     await state.clear()
 
-    # показать меню (если не нужен текст — поставь title=None)
+    # показать меню
     await send_step(bot, chat_id, state, "Отменено.", kb.kb_main_menu().as_markup(), reply_mode="menu")
 
 
@@ -552,7 +562,6 @@ async def on_back(message: Message, state: FSMContext):
 
 
 # ---------- Доступность ----------
-
 @router.message(F.text == "/avail")
 @router.callback_query(F.data == "avail")
 async def cmd_avail(evt, state: FSMContext):
@@ -588,11 +597,13 @@ async def _show_availability(dst_msg: Message, date_iso: str | None, label: str)
         lines.append(f"• {s} — {'❌ занято' if (avail.get(s, '') or '').strip() else '✅ свободно'}")
     await dst_msg.answer("\n".join(lines))
 
+
 def _is_admin(user_id: int) -> bool:
     ids = set(getattr(cfg, "admin_ids", []) or [])
     if getattr(cfg, "admin_chat_id", 0):
         ids.add(cfg.admin_chat_id)
     return user_id in ids
+
 
 @router.callback_query(F.data.startswith("adm:"))
 async def on_admin_action(cb: CallbackQuery):
@@ -600,8 +611,9 @@ async def on_admin_action(cb: CallbackQuery):
         return await cb.answer("Нет доступа", show_alert=True)
 
     _, action, req_id = cb.data.split(":", 2)
-    row = sheets.get_by_request_id(req_id)
 
+    # Требуются методы в sheets: get_by_request_id/set_status/clear_slot
+    row = sheets.get_by_request_id(req_id)
     if not row:
         return await cb.answer("Заявка не найдена", show_alert=True)
 
@@ -614,7 +626,7 @@ async def on_admin_action(cb: CallbackQuery):
                     f"Ваша заявка {req_id} подтверждена ✅\n"
                     f"{row['Service']} — {row['DateText']} {row['TimeSlot']}"
                 )
-            except:
+            except Exception:
                 pass
 
             await cb.message.edit_text(cb.message.text + "\n\n✅ Подтверждено", reply_markup=None)
@@ -624,7 +636,7 @@ async def on_admin_action(cb: CallbackQuery):
             sheets.set_status(req_id, "Отклонена")
             try:
                 sheets.clear_slot(row["DateISO"], row["TimeSlot"])
-            except:
+            except Exception:
                 pass
             try:
                 await cb.bot.send_message(
@@ -632,7 +644,7 @@ async def on_admin_action(cb: CallbackQuery):
                     f"К сожалению, заявка {req_id} отклонена ❌.\n"
                     "Можно выбрать другой слот."
                 )
-            except:
+            except Exception:
                 pass
 
             await cb.message.edit_text(cb.message.text + "\n\n❌ Отклонено", reply_markup=None)
@@ -644,33 +656,43 @@ async def on_admin_action(cb: CallbackQuery):
         log.exception("Admin action failed: %s", e)
         await cb.answer("Ошибка при изменении статуса", show_alert=True)
 
-# ---------- Launcher ----------
+
+# ---------- Fallback на любой текст (в конце, после всех хендлеров!) ----------
+@router.message(F.text)
+async def fallback_text(message: Message):
+    # не трогаем state — просто подсказка
+    await message.answer("Нажмите /start или кнопку в меню.")
+
 
 # ---------- Launcher (polling + webhook) ----------
-
 async def _build_dp_and_bot():
     bot = Bot(cfg.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
     dp.include_router(router)
     return dp, bot
 
+
 async def main_polling():
     dp, bot = await _build_dp_and_bot()
     await dp.start_polling(bot)
+
 
 def main_webhook():
     app = web.Application()
 
     # healthcheck
-    app.router.add_get("/", lambda r: web.Response(text="ok"))  # опционально для корня
-    app.router.add_get("/ping", lambda r: web.Response(text="ok"))  # собственно «пинг»
+    app.router.add_get("/", lambda r: web.Response(text="ok"))
+    app.router.add_get("/ping", lambda r: web.Response(text="ok"))
+
     # соберём dp/bot заранее (НЕ в on_startup)
     bot = Bot(cfg.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
     dp.include_router(router)
 
     # регистрируем вебхуковый хендлер и интеграцию с aiohttp
-    SimpleRequestHandler(dp, bot, secret_token=WEBHOOK_SECRET).register(app, WEBHOOK_PATH)
+    SimpleRequestHandler(
+        dp, bot, secret_token=WEBHOOK_SECRET, handle_in_background=True  # быстрый ответ 200
+    ).register(app, WEBHOOK_PATH)
     setup_application(app, dp, bot=bot)
 
     async def on_startup(_):
@@ -693,8 +715,3 @@ if __name__ == "__main__":
         asyncio.run(main_polling())
     else:
         main_webhook()
-
-@router.message(F.text)
-async def fallback_text(message: Message):
-    # не трогаем state — просто покажем подсказку
-    await message.answer("Нажмите /start или кнопку в меню.")
