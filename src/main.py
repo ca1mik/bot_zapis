@@ -140,7 +140,8 @@ def admin_kb(row: dict) -> InlineKeyboardMarkup:
 # ---------- Команды ----------
 
 # /start — показать меню (и удалить команду из чата)
-@router.message(F.text == "/start")
+# /start — показать меню (и удалить команду из чата)
+@router.message(F.text.regexp(r"^/start(\s|$)"))
 async def cmd_start(message: Message, state: FSMContext):
     try: await message.delete()
     except: pass
@@ -661,8 +662,8 @@ def main_webhook():
     app = web.Application()
 
     # healthcheck
-    app.router.add_get("/ping", lambda request: web.Response(text="ok"))
-
+    app.router.add_get("/", lambda r: web.Response(text="ok"))  # опционально для корня
+    app.router.add_get("/ping", lambda r: web.Response(text="ok"))  # собственно «пинг»
     # соберём dp/bot заранее (НЕ в on_startup)
     bot = Bot(cfg.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
@@ -692,3 +693,8 @@ if __name__ == "__main__":
         asyncio.run(main_polling())
     else:
         main_webhook()
+
+@router.message(F.text)
+async def fallback_text(message: Message):
+    # не трогаем state — просто покажем подсказку
+    await message.answer("Нажмите /start или кнопку в меню.")
