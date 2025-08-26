@@ -625,36 +625,33 @@ async def main_polling():
     await dp.start_polling(bot)
 
 def main_webhook():
-    # aiohttp-приложение
     app = web.Application()
+
+    # healthcheck
     app.router.add_get("/ping", lambda request: web.Response(text="ok"))
 
-    # создаём dp/bot
-    # (делаем через замыкание, чтобы иметь доступ в on_startup)
-    dp_bot = {"dp": None, "bot": None}
+    # соберём dp/bot заранее (НЕ в on_startup)
+    bot = Bot(cfg.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    dp = Dispatcher()
+    dp.include_router(router)
+
+    # регистрируем вебхуковый хендлер и интеграцию с aiohttp
+    SimpleRequestHandler(dp, bot, secret_token=WEBHOOK_SECRET).register(app, WEBHOOK_PATH)
+    setup_application(app, dp, bot=bot)
 
     async def on_startup(_):
-        dp, bot = await _build_dp_and_bot()
-        dp_bot["dp"] = dp
-        dp_bot["bot"] = bot
-        # регистрируем хендлер вебхука
-        SimpleRequestHandler(dp, bot, secret_token=WEBHOOK_SECRET).register(app, WEBHOOK_PATH)
-        setup_application(app, dp, bot=bot)
-
         if not WEBHOOK_URL:
-            # если WEBHOOK_BASE не задан, попробуем взять RENDER_EXTERNAL_URL (уже учтено наверху)
-            raise RuntimeError("WEBHOOK_BASE/RENDER_EXTERNAL_URL не задан. См. переменные окружения на Render.")
+            raise RuntimeError("WEBHOOK_BASE/RENDER_EXTERNAL_URL не задан. См. переменные окружения Render.")
         await bot.set_webhook(WEBHOOK_URL, secret_token=WEBHOOK_SECRET)
 
     async def on_shutdown(_):
-        bot = dp_bot.get("bot")
-        if bot:
-            await bot.delete_webhook(drop_pending_updates=True)
+        await bot.delete_webhook(drop_pending_updates=True)
 
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
 
     web.run_app(app, host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
+
 
 if __name__ == "__main__":
     mode = os.getenv("MODE", "webhook")  # webhook (по умолчанию) или polling
