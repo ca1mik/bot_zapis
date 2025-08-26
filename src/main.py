@@ -627,6 +627,7 @@ async def main_polling():
 def main_webhook():
     # aiohttp-приложение
     app = web.Application()
+    app.router.add_get("/ping", lambda request: web.Response(text="ok"))
 
     # создаём dp/bot
     # (делаем через замыкание, чтобы иметь доступ в on_startup)
