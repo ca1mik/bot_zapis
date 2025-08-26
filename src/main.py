@@ -1,4 +1,8 @@
 # src/main.py
+import os
+from aiohttp import web
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+
 import asyncio
 import logging
 from datetime import datetime, date, timedelta
@@ -50,6 +54,13 @@ router = Router()
 
 # Невидимый символ как «якорь» для reply-клавы
 ANCHOR_TEXT = "\u2063"
+
+# --- Webhook config (для Render) ---
+WEBHOOK_PATH = "/webhook"
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "change_me")  # поставь случайную строку в ENV
+# Render сам даёт внешний URL в переменной RENDER_EXTERNAL_URL — используем как базу
+WEBHOOK_BASE = os.getenv("WEBHOOK_BASE") or os.getenv("RENDER_EXTERNAL_URL", "")
+WEBHOOK_URL = f"{WEBHOOK_BASE}{WEBHOOK_PATH}" if WEBHOOK_BASE else ""
 
 
 # ---------- Reply-клава снизу ----------
@@ -601,16 +612,52 @@ async def on_admin_action(cb: CallbackQuery):
 
 # ---------- Launcher ----------
 
-async def main():
+# ---------- Launcher (polling + webhook) ----------
+
+async def _build_dp_and_bot():
     bot = Bot(cfg.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
-    dp.message.middleware(AutoDeleteUserTextMiddleware())
     dp.include_router(router)
+    return dp, bot
+
+async def main_polling():
+    dp, bot = await _build_dp_and_bot()
     await dp.start_polling(bot)
 
+def main_webhook():
+    # aiohttp-приложение
+    app = web.Application()
+
+    # создаём dp/bot
+    # (делаем через замыкание, чтобы иметь доступ в on_startup)
+    dp_bot = {"dp": None, "bot": None}
+
+    async def on_startup(_):
+        dp, bot = await _build_dp_and_bot()
+        dp_bot["dp"] = dp
+        dp_bot["bot"] = bot
+        # регистрируем хендлер вебхука
+        SimpleRequestHandler(dp, bot, secret_token=WEBHOOK_SECRET).register(app, WEBHOOK_PATH)
+        setup_application(app, dp, bot=bot)
+
+        if not WEBHOOK_URL:
+            # если WEBHOOK_BASE не задан, попробуем взять RENDER_EXTERNAL_URL (уже учтено наверху)
+            raise RuntimeError("WEBHOOK_BASE/RENDER_EXTERNAL_URL не задан. См. переменные окружения на Render.")
+        await bot.set_webhook(WEBHOOK_URL, secret_token=WEBHOOK_SECRET)
+
+    async def on_shutdown(_):
+        bot = dp_bot.get("bot")
+        if bot:
+            await bot.delete_webhook(drop_pending_updates=True)
+
+    app.on_startup.append(on_startup)
+    app.on_shutdown.append(on_shutdown)
+
+    web.run_app(app, host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        pass
+    mode = os.getenv("MODE", "webhook")  # webhook (по умолчанию) или polling
+    if mode == "polling":
+        asyncio.run(main_polling())
+    else:
+        main_webhook()
